@@ -22,7 +22,7 @@ class AVmusicSkill(CommonPlaySkill):
         self.tmp_file = None
         self.eta = None
 
-    def CPS__match_query_phrase(self, phrase):
+    def CPS_match_query_phrase(self, phrase):
         # Youtube with find a result for ANYTHING.  So there is no need to
         # wait for an actual search to happen, just assume we'll get a hit.
         if self.voc_match(phrase.lower(), "Youtube"):
@@ -30,7 +30,7 @@ class AVmusicSkill(CommonPlaySkill):
         else:
             return (phrase, CPSMatchLevel.GENERIC, None)
 
-    def CPS__start(self, phrase, data):
+    def CPS_start(self, phrase, data):
         # Search Youtube for the videos matching the search
         self.enclosure.mouth_text("Searching Youtube...")
         try:
@@ -101,9 +101,9 @@ class AVmusicSkill(CommonPlaySkill):
 
     @intent_file_handler("youtube.intent")
     def handle_youtube(self, message):
-        result = self.CPS__match_query_phrase(message.data["target"])
+        result = self.CPS_match_query_phrase(message.data["target"])
         if result:
-            self.CPS__start(result[0], result[2])
+            self.CPS_start(result[0], result[2])
 
     def _show_title(self):
         def has(x):
