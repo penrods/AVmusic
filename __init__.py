@@ -1,100 +1,150 @@
 # -*- coding: utf-8 -*-
-import urllib.error
 import urllib.parse
 import urllib.request
-from os.path import dirname
-from subprocess import DEVNULL, STDOUT, check_call
+import youtube_dl
+import subprocess
+import os
+import os.path
+import time
 from adapt.intent import IntentBuilder
 from bs4 import BeautifulSoup
+from mycroft import intent_file_handler
+from mycroft.skills.common_play_skill import CommonPlaySkill, CPSMatchLevel
 
-from mycroft.skills.core import MycroftSkill
-
-try:
-    from mycroft.device import device as d_hw
-except ImportError:
-    d_hw = 'desktop'
-
-
-class AVmusicSkill(MycroftSkill):
+class AVmusicSkill(CommonPlaySkill):
     def __init__(self):
-        super(AVmusicSkill, self).__init__(name="AVmusicSkill")
+        super().__init__(name="AVmusicSkill")
+
         self.process = None
+        self.search_results = {}
+        self.info_dict = {}
+        self.tmpl = "/tmp/AVmusic"
+        self.tmp_file = None
+        self.eta = None
 
-    def initialize(self):
-        playnow_intent = IntentBuilder("playnow_intent"). \
-            require("AgreementKeyword").build()
-        self.register_intent(playnow_intent, self.handle_playnow_intent)
+    def CPS__match_query_phrase(self, phrase):
+        # Youtube with find a result for ANYTHING.  So there is no need to
+        # wait for an actual search to happen, just assume we'll get a hit.
+        if self.voc_match(phrase.lower(), "Youtube"):
+            return (phrase, CPSMatchLevel.MULTI_KEY, None)
+        else:
+            return (phrase, CPSMatchLevel.GENERIC, None)
 
-        # For future implementation:
-        # pause_intent = IntentBuilder("pause_intent"). \
-        #    require("PauseKeyword").build()
-        # self.register_intent(pause_intent, self.handle_pause_intent)
-        # self.disable_intent('pause_intent')
-
-        not_now_intent = IntentBuilder("not_now_intent"). \
-            require("DeclineKeyword").build()
-        self.register_intent(not_now_intent, self.handle_not_now_intent)
-
-        AVmusic = IntentBuilder("AVmusic_intent"). \
-            require("AVmusicKeyword").build()
-        self.register_intent(AVmusic, self.AVmusic)
-
-        self.load_data_files(dirname(__file__))
-
-        self.disable_intent('playnow_intent')
-        self.disable_intent('not_now_intent')
-
-    @staticmethod
-    def search(text):
-        query = urllib.parse.quote(text)
-        url = "https://www.youtube.com/results?search_query=" + query
-        response = urllib.request.urlopen(url)
-        html = response.read()
-        soup = BeautifulSoup(html, "html.parser")
-        for vid in soup.findAll(attrs={'class': 'yt-uix-tile-link'}):
-            if not vid['href'].startswith("https://googleads.g.doubleclick.net/‌​") \
-                    and not vid['href'].startswith("/user") and not vid['href'].startswith("/channel"):
-                return "http://www.youtube.com/" + vid['href']
-
-    def AVmusic(self, message):
-        self.stop()
-        self.speak('Would you like me to play it now?', True)
-
-        utterance = message.data.get('utterance').lower()
-        utterance = utterance.replace(
-            message.data.get('AVmusicKeyword'), '')
-        self.vid = self.search(utterance + "playlist")
-
-        self.enable_intent('playnow_intent')
-        self.enable_intent('not_now_intent')
-
-    def handle_playnow_intent(self, message):
+    def CPS__start(self, phrase, data):
+        # Search Youtube for the videos matching the search
+        self.enclosure.mouth_text("Searching Youtube...")
         try:
-            if d_hw == 'pi':
-                self.process = check_call(["mpv", "--vid=no", self.vid], stdout=DEVNULL, stderr=STDOUT)
-            else:
-                self.process = check_call(["mpv", self.vid], stdout=DEVNULL, stderr=STDOUT)
-            # self.enable_intent('pause_intent')
-            self.speak_dialog('SayStop')
+            url = self.search(phrase)
 
-        except TypeError:
+            # Download the results...
+            self.enclosure.mouth_text("Downloading...")
+            ydl_opts = {
+                # Download audio only
+                'format': 'bestaudio/best',
+
+                # Output to this filename
+                'outtmpl': self.tmpl,
+
+                # Progress sent here
+                'progress_hooks': [self.progress_hook]
+            }
+            with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                self.info_dict = ydl.extract_info(url)
+
+            # Verify what was returned by YoutubeDL
+            self.tmp = self.tmpl
+            if not os.path.isfile(self.tmp) and "ext" in self.info_dict:
+                self.tmp = self.tmpl + "." + self.info_dict["ext"]
+            if not os.path.isfile(self.tmp):
+                # Assume parts were merged into a mkv file
+                self.tmp = self.tmpl + ".mkv"
+
+            # Begin playback via MPV
+            self.process = subprocess.Popen(["mpv", "--no-video", self.tmp],
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.STDOUT)
+            self.schedule_repeating_event(self._monitor_playing,
+                                        None, 1,
+                                        name='MonitorAVMusic')
+            self._show_title()
+        except Exception as e:
+            self.log.error(repr(e))
             self.speak_dialog('TryAgain')
             self.stop()
 
-        self.disable_intent('not_now_intent')
-        self.disable_intent('playnow_intent')
+    def progress_hook(self, d):
+        if "_eta_str" in d:
+            if self.eta is not d["_eta_str"]:
+                self.eta = d["_eta_str"]
+                self.enclosure.mouth_text(self.eta)
 
-    def handle_not_now_intent(self, message):
-        self.speak_dialog('ChangeMind')
-        self.disable_intent('not_now_intent')
+    def search(self, phrase):
+        if phrase not in self.search_results:
+            # Perform a Youtube search
+            query = urllib.parse.quote(phrase)
+            url = "https://www.youtube.com/results?search_query=" + query
+            response = urllib.request.urlopen(url)
+            html = response.read()
+            soup = BeautifulSoup(html, "html.parser")
 
-    # def handle_pause_intent(self, message):
-    #    self.process.Popen.communicate("P")
+            # Parse the results, looking for any found videos
+            self.search_results[phrase] = None
+            for vid in soup.findAll(attrs={'class': 'yt-uix-tile-link'}):
+                # Skip commercial videos
+                if not vid['href'].startswith("https://googleads.g.doubleclick.net/‌​") \
+                        and not vid['href'].startswith("/user") \
+                        and not vid['href'].startswith("/channel"):
+                    self.search_results[phrase] = "http://www.youtube.com/" + vid['href']
+                    break
+
+        return self.search_results[phrase]
+
+    @intent_file_handler("youtube.intent")
+    def handle_youtube(self, message):
+        result = self.CPS__match_query_phrase(message.data["target"])
+        if result:
+            self.CPS__start(result[0], result[2])
+
+    def _show_title(self):
+        def has(x):
+            return x in self.info_dict and self.info_dict[x]
+
+        if has("artist") and has("track"):
+            title = self.info_dict['artist'] + " : " + self.info_dict['track']
+        elif has("track"):
+            title = self.info_dict['track']
+        elif has("title"):
+            title = "Playing: " + self.info_dict['title']
+        elif has("description"):
+            title = "Playing: " + self.info_dict['description']
+        else:
+            title = "Playing from Youtube..."
+        self.enclosure.mouth_text(title[:30])
+
+    def _monitor_playing(self, message):
+        if self.enclosure.display_manager.get_active() == '':
+            self._show_title()
+
+        exit_code = self.process.poll()
+        if exit_code is not None:
+            # completed
+            self.stop()
 
     def stop(self):
         if self.process:
-            self.process.terminate()
-        pass
+            self.cancel_scheduled_event("MonitorAVMusic")
+            self.enclosure.mouth_reset()
+            if self.process.poll() is None:  # None = still running
+                self.process.terminate()
+            self.process = None
+            try:
+                os.remove(self.tmp)
+            except Exception:
+                # Ignore this problem
+                pass
+            return True
+        else:
+            return False
 
 
 def create_skill():

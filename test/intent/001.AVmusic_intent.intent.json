@@ -1,7 +1,4 @@
 {
-  "utterance": "av play some imagine dragons music playlist",
-  "intent_type": "AVmusic_intent",
-  "intent": {
-    "AVmusicKeyword": "av play some"
-  }
+  "utterance": "play i have a dream",
+  "intent_type": "mycroft-playback-control.mycroftai:play"
 }
